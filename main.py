@@ -7,69 +7,60 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from schemas import AnalysisResponse
+from pipeline_adapter import run_pipeline
 
 app = FastAPI(title="Deepfake Detection API")
 
-# Configure CORS so Vite dev server can call the backend
+# Broad CORS permissions for hackathon testing
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Ensure required directories exist and mount results as static assets
-Path("results").mkdir(exist_ok=True)
-Path("uploads").mkdir(exist_ok=True)
-app.mount("/results", StaticFiles(directory="results"), name="results")
+# Absolute directory setup
+UPLOAD_DIR = Path("uploads").resolve()
+RESULTS_DIR = Path("results").resolve()
+UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+app.mount("/results", StaticFiles(directory=str(RESULTS_DIR)), name="results")
 
 @app.post("/analyze", response_model=AnalysisResponse)
 async def analyze_file(file: UploadFile = File(...)):
     start_time = time.time()
+    
+    file_ext = Path(file.filename).suffix.lower()
+    valid_extensions = {".jpg", ".jpeg", ".png", ".webp", ".mp4", ".mov", ".avi"}
+    
+    is_valid_type = (
+        (file.content_type and file.content_type.startswith(("image/", "video/"))) 
+        or file_ext in valid_extensions
+    )
 
-    # Content-type validation
-    if not file.content_type.startswith(("image/", "video/")):
+    if not is_valid_type:
         raise HTTPException(status_code=400, detail="Only image and video files are supported.")
 
-    # Save file with UUID to prevent naming collisions
-    file_ext = Path(file.filename).suffix
-    saved_filename = f"{uuid.uuid4()}{file_ext}"
-    saved_path = Path("uploads") / saved_filename
+    saved_filename = f"{uuid.uuid4()}{file_ext if file_ext else '.png'}"
+    saved_path = UPLOAD_DIR / saved_filename
 
     with open(saved_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    file_type = "video" if file.content_type.startswith("video/") else "image"
+    file_type = "video" if file_ext in {".mp4", ".mov", ".avi"} or (file.content_type and "video" in file.content_type) else "image"
+
+    # Execute dynamic pipeline analysis (ELA, FFT, Metadata)
+    results = run_pipeline(str(saved_path), file_type)
     duration_ms = int((time.time() - start_time) * 1000)
 
-    # Stub response conforming to the agreed schema
     return {
         "file_type": file_type,
-        "overall_verdict": "potentially_manipulated",
-        "overall_score": 0.78,
-        "checks": {
-            "ai_generation": {
-                "score": 0.82,
-                "level": "HIGH",
-                "explanation": "Frequency-domain artifacts consistent with GAN/diffusion synthesis"
-            },
-            "face_manipulation": {
-                "score": 0.65,
-                "level": "MEDIUM",
-                "explanation": "Inconsistent blending boundary detected around jawline"
-            },
-            "metadata_anomaly": {
-                "score": 0.40,
-                "level": "LOW",
-                "explanation": "EXIF present but editing software signature found (Photoshop 25.0)"
-            },
-            "compression_inconsistency": {
-                "score": 0.55,
-                "level": "MEDIUM",
-                "explanation": "Error Level Analysis shows uneven compression across regions"
-            }
-        },
-        "heatmap_image_url": "/results/sample_heatmap.png",
-        "processing_time_ms": duration_ms
+        "overall_verdict": results["overall_verdict"],
+        "overall_score": results["overall_score"],
+        "checks": results["checks"],
+        "heatmap_image_url": results["heatmap_image_url"],
+        "processing_time_ms": duration_ms,
+        "frames": results.get("frames")
     }

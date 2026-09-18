@@ -5,4 +5,8 @@ uploads/*
 !uploads/.gitkeep
 results/*
 !results/.gitkeep
-.env
+.envvenv/ 
+__pycache__/ 
+uploads/ 
+results/ 
+node_modules/ 
